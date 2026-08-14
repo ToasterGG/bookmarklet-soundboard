@@ -37,12 +37,14 @@
     .search{margin-left:auto}
 
     label.input{display:flex;flex-direction:column;gap:6px}
-    input[type=text]{padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:inherit}
+    input[type=text], input[type=password]{padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:inherit}
 
     .progress{height:6px;background:rgba(255,255,255,0.02);border-radius:6px;overflow:hidden}
     .progress > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#8b5cf6);width:0}
 
     .note{font-size:13px;color:var(--muted)}
+    .muted{color:var(--muted)}
+    .badge{font-size:12px;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.03)}
 
     @media (max-width:520px){.uploader{flex-direction:column;align-items:stretch}}
   </style>
@@ -52,7 +54,7 @@
     <header>
       <div>
         <h1>Bookmarklet Soundboard</h1>
-        <p class="lead">Upload audio, name the buttons, and store them locally in your browser (localStorage).</p>
+        <p class="lead">Upload audio, name the buttons, and store them locally or push them to the repo automatically.</p>
       </div>
     </header>
 
@@ -68,9 +70,16 @@
         </label>
       </div>
 
+      <div style="min-width:260px;flex:0 0 320px">
+        <label class="input">
+          <span class="small">GitHub token (used only this session). Uploads will always go to ToasterGG/bookmarklet-soundboard in folder /sounds/ on the main branch.</span>
+          <input type="password" id="ghToken" placeholder="Paste GitHub token (public_repo) here">
+        </label>
+      </div>
+
       <div class="controls">
         <button class="btn" id="addFilesBtn">Add selected</button>
-        <button class="btn ghost" id="importBtn">Import JSON</button>
+        <button class="btn ghost" id="uploadAllBtn">Upload all to repo</button>
         <button class="btn ghost" id="exportBtn">Export JSON</button>
         <button class="btn danger" id="clearAllBtn">Clear all</button>
       </div>
@@ -91,8 +100,17 @@
 
   <script>
     (function(){
+      // Fixed repo configuration (no other choice)
+      const GITHUB_OWNER = 'ToasterGG';
+      const GITHUB_REPO = 'bookmarklet-soundboard';
+      const GITHUB_BRANCH = 'main';
+      const GITHUB_FOLDER = 'sounds';
+
       const STORAGE_KEY = 'bookmarklet-soundboard:sounds:v1';
       document.getElementById('storageKey').textContent = STORAGE_KEY;
+
+      // session token only (not persisted)
+      let sessionToken = '';
 
       let sounds = loadSounds();
       const board = document.getElementById('board');
@@ -103,7 +121,8 @@
       const addFilesBtn = document.getElementById('addFilesBtn');
       const clearAllBtn = document.getElementById('clearAllBtn');
       const exportBtn = document.getElementById('exportBtn');
-      const importBtn = document.getElementById('importBtn');
+      const uploadAllBtn = document.getElementById('uploadAllBtn');
+      const tokenInput = document.getElementById('ghToken');
       const progressContainer = document.getElementById('progressContainer');
 
       renderBoard();
@@ -115,6 +134,8 @@
 
       fileInput.addEventListener('change', ()=>{ /* do nothing until Add selected clicked */ });
       addFilesBtn.addEventListener('click', ()=>{ handleFiles(fileInput.files); fileInput.value = ''; });
+
+      tokenInput.addEventListener('input', ()=>{ sessionToken = tokenInput.value.trim(); });
 
       clearAllBtn.addEventListener('click', ()=>{
         if(!confirm('Remove all saved sounds from localStorage? This cannot be undone.')) return;
@@ -130,27 +151,18 @@
         setTimeout(()=>URL.revokeObjectURL(url), 3000);
       });
 
-      importBtn.addEventListener('click', ()=>{
-        const f = document.createElement('input'); f.type='file'; f.accept='application/json';
-        f.onchange = ()=>{
-          const file = f.files[0]; if(!file) return;
-          const r = new FileReader(); r.onload = ()=>{
-            try{ const imported = JSON.parse(r.result); if(!Array.isArray(imported)) throw new Error('Invalid format');
-              // basic validation
-              const validated = imported.filter(s => s && s.id && s.dataURL && s.name);
-              if(validated.length===0) return alert('No valid sounds found in the file.');
-              // optional confirm if large
-              const totalSize = validated.reduce((s,x)=>s + Math.ceil((x.dataURL.length*3)/4),0);
-              if(totalSize > 5*1024*1024 && !confirm('Import is large and may exceed localStorage limits. Continue?')) return;
-              // merge with existing
-              sounds = sounds.concat(validated);
-              saveSounds(); renderBoard();
-              alert('Imported '+validated.length+' sounds.');
-            }catch(err){ alert('Failed to import: '+err.message) }
-          };
-          r.readAsText(file);
-        };
-        f.click();
+      uploadAllBtn.addEventListener('click', async ()=>{
+        if(!sessionToken){ alert('Please paste a GitHub token in the token field (session-only). Use a token with public_repo scope.'); tokenInput.focus(); return; }
+        const candidates = sounds.filter(s => typeof s.dataURL === 'string' && s.dataURL.startsWith('data:'));
+        if(candidates.length===0){ alert('No local sounds to upload (already uploaded or remote).'); return; }
+        if(!confirm('Upload '+candidates.length+' sound(s) to the repo ' + GITHUB_OWNER + '/' + GITHUB_REPO + ' in folder /'+GITHUB_FOLDER+'/?')) return;
+        for(let i=0;i<candidates.length;i++){
+          const s = candidates[i];
+          showProgress('Uploading '+(i+1)+' / '+candidates.length+': '+s.filename);
+          try{ await uploadSoundToRepo(s); saveSounds(); renderBoard(); }
+          catch(e){ alert('Upload failed for '+s.filename+': '+e.message); break; }
+        }
+        hideProgress();
       });
 
       function handleFiles(fileList){
@@ -162,8 +174,8 @@
         (function next(){
           const file = files[idx++];
           const suggested = defaultNameInput.value.trim() || file.name.replace(/\.[^.]+$/, '');
-          if(file.size > 3*1024*1024){
-            if(!confirm(file.name + ' is large ('+Math.round(file.size/1024)+' KB). Storing it may fail due to localStorage limits. Continue?')){ done(); return; }
+          if(file.size > 50*1024*1024){
+            if(!confirm(file.name + ' is large ('+Math.round(file.size/1024)+' KB). Storing it may fail due to limits. Continue?')){ done(); return; }
           }
           const reader = new FileReader();
           reader.onload = (ev)=>{
@@ -191,7 +203,8 @@
       function playSound(id){
         const s = sounds.find(x=>x.id===id); if(!s) return;
         try{
-          const a = new Audio(s.dataURL);
+          const src = s.dataURL;
+          const a = new Audio(src);
           a.play().catch(e=>{ alert('Playback failed: '+e.message) });
         }catch(e){ alert('Playback error: '+e.message) }
       }
@@ -206,20 +219,72 @@
         sounds = sounds.filter(x=>x.id!==id); saveSounds(); renderBoard();
       }
 
-      function saveSounds(){
-        // we store the full array as JSON
-        try{
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(sounds));
-        }catch(e){
-          // try to give helpful message
-          throw e;
+      async function uploadSoundToRepo(sound){
+        // only upload if we have a data URL (local)
+        if(!sessionToken) throw new Error('No GitHub token in session');
+        if(!sound || !sound.dataURL || !sound.dataURL.startsWith('data:')) throw new Error('Sound has no local data to upload');
+
+        // extract base64
+        const comma = sound.dataURL.indexOf(',');
+        const meta = sound.dataURL.substring(5, comma); // e.g. audio/mp3;base64
+        const b64 = sound.dataURL.substring(comma+1);
+
+        // sanitize filename and ensure unique by prefixing timestamp
+        const ext = detectExtensionFromMimeOrFilename(sound.mime, sound.filename) || 'bin';
+        const safeName = sanitizeFilename(sound.filename || sound.name) || ('sound-' + Date.now());
+        const filename = Date.now().toString(36) + '-' + safeName + (safeName.endsWith('.'+ext) ? '' : ('.'+ext));
+        const path = (GITHUB_FOLDER ? GITHUB_FOLDER + '/' : '') + filename;
+
+        const url = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO) + '/contents/' + encodeURIComponent(path);
+        const body = { message: 'Add sound ' + sound.name, content: b64, branch: GITHUB_BRANCH };
+
+        const res = await fetch(url, { method:'PUT', headers: { 'Authorization': 'token ' + sessionToken, 'Content-Type':'application/json', 'Accept':'application/vnd.github.v3+json' }, body: JSON.stringify(body) });
+        const data = await res.json();
+        if(!res.ok) {
+          // helpful error
+          const msg = (data && data.message) ? data.message : ('HTTP '+res.status);
+          throw new Error(msg);
         }
+
+        // success — replace dataURL with raw URL for playback
+        const rawUrl = 'https://raw.githubusercontent.com/' + GITHUB_OWNER + '/' + GITHUB_REPO + '/' + GITHUB_BRANCH + '/' + path;
+        sound.dataURL = rawUrl;
+        sound.remotePath = path;
+        sound.remoteUrl = rawUrl;
+        sound.uploadedAt = Date.now();
+      }
+
+      function detectExtensionFromMimeOrFilename(mime, filename){
+        if(filename){ const m = filename.match(/\.([a-z0-9]+)$/i); if(m) return m[1].toLowerCase(); }
+        if(!mime) return null;
+        if(mime.includes('mpeg')||mime.includes('mp3')) return 'mp3';
+        if(mime.includes('wav')) return 'wav';
+        if(mime.includes('ogg')) return 'ogg';
+        if(mime.includes('mpeg')) return 'mp3';
+        if(mime.includes('webm')) return 'webm';
+        if(mime.includes('aac')) return 'aac';
+        return null;
+      }
+
+      function sanitizeFilename(name){
+        if(!name) return '';
+        // remove path, keep base
+        name = name.split('/').pop().split('\\').pop();
+        // replace spaces with dashes, remove unsafe chars
+        name = name.replace(/\s+/g,'-').replace(/[^a-zA-Z0-9-_.]/g,'');
+        // truncate
+        if(name.length>64) name = name.slice(0,64);
+        return name;
+      }
+
+      function saveSounds(){
+        try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(sounds)); }
+        catch(e){ throw e; }
       }
 
       function loadSounds(){
-        try{
-          const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : [];
-        }catch(e){ console.error('Failed to load sounds', e); return []; }
+        try{ const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : []; }
+        catch(e){ console.error('Failed to load sounds', e); return []; }
       }
 
       function renderBoard(){
@@ -228,14 +293,35 @@
         sounds.forEach(s=>{
           const card = document.createElement('div'); card.className='card';
           const name = document.createElement('div'); name.className='name'; name.title = s.name; name.textContent = s.name;
-          const meta = document.createElement('div'); meta.className='meta'; meta.textContent = s.filename ? s.filename + ' • ' + readableSize(s.size) : readableSize(s.size);
+          const meta = document.createElement('div'); meta.className='meta';
+          const metaText = (s.remoteUrl ? s.remoteUrl : (s.filename ? s.filename + ' • ' + readableSize(s.size) : readableSize(s.size)));
+          meta.textContent = metaText;
+
           const play = document.createElement('button'); play.className='play'; play.textContent = 'Play'; play.addEventListener('click', ()=> playSound(s.id));
+
           const actions = document.createElement('div'); actions.className='actions';
           const rename = document.createElement('button'); rename.className='tiny btn'; rename.textContent='Rename'; rename.addEventListener('click', ()=> renameSound(s.id));
           const dl = document.createElement('a'); dl.className='tiny btn'; dl.textContent='Download'; dl.href = s.dataURL; dl.download = s.filename || (s.name + '.bin');
           const del = document.createElement('button'); del.className='tiny btn'; del.textContent='Delete'; del.style.background='transparent'; del.style.border='1px solid rgba(255,255,255,0.04)'; del.addEventListener('click', ()=> deleteSound(s.id));
 
-          actions.appendChild(rename); actions.appendChild(dl); actions.appendChild(del);
+          actions.appendChild(rename);
+
+          // Upload button shown only if local data URL
+          if(typeof s.dataURL === 'string' && s.dataURL.startsWith('data:')){
+            const up = document.createElement('button'); up.className='tiny btn'; up.textContent='Upload'; up.addEventListener('click', async ()=>{
+              if(!sessionToken){ alert('Please paste a GitHub token in the token field (session-only).'); tokenInput.focus(); return; }
+              showProgress('Uploading ' + (s.filename || s.name) + '...');
+              try{ await uploadSoundToRepo(s); saveSounds(); renderBoard(); hideProgress(); alert('Uploaded to repo: ' + s.remoteUrl); }
+              catch(e){ hideProgress(); alert('Upload failed: ' + e.message); }
+            });
+            actions.appendChild(up);
+          }else if(s.remoteUrl){
+            const badge = document.createElement('span'); badge.className='badge muted'; badge.textContent='In repo'; actions.appendChild(badge);
+          }
+
+          actions.appendChild(dl);
+          actions.appendChild(del);
+
           card.appendChild(name); card.appendChild(meta); card.appendChild(play); card.appendChild(actions);
           board.appendChild(card);
         });
