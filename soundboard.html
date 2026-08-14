@@ -70,14 +70,15 @@
         </label>
       </div>
 
-      <div style="min-width:260px;flex:0 0 360px">
+      <div style="min-width:360px;flex:0 0 420px">
         <label class="input">
-          <span class="small">Cloudflare Worker URL (optional) — if set, uploads go through your Worker and users do not need GitHub tokens.</span>
-          <input type="text" id="uploaderUrl" placeholder="https://your-worker.example.workers.dev">
+          <span class="small">Cloudflare Worker URL: hardcoded (no action needed)</span>
+          <input type="text" id="uploaderUrl" readonly>
         </label>
         <label class="input" style="margin-top:6px">
-          <span class="small">Upload key (enter once) — if your Worker requires a shared key, paste it here. Saved locally.</span>
+          <span class="small">Upload key (enter once) — paste the shared key here if your Worker requires it.</span>
           <input type="text" id="uploadKeyField" placeholder="Paste upload key (optional)">
+          <label style="font-size:12px;margin-top:6px"><input type="checkbox" id="saveUploadKey" checked> Save upload key to this device for future use</label>
         </label>
       </div>
 
@@ -90,7 +91,7 @@
 
       <div class="controls">
         <button class="btn" id="addFilesBtn">Add selected</button>
-        <button class="btn ghost" id="uploadAllBtn">Upload all (Worker if set, otherwise GitHub token)</button>
+        <button class="btn ghost" id="uploadAllBtn">Upload all (Worker)</button>
         <button class="btn ghost" id="exportBtn">Export JSON</button>
         <button class="btn danger" id="clearAllBtn">Clear all</button>
       </div>
@@ -117,6 +118,9 @@
       const GITHUB_BRANCH = 'main';
       const GITHUB_FOLDER = 'sounds';
 
+      // Hardcoded worker URL provided by you
+      const HARDCODED_UPLOADER_URL = 'https://soundboard.thehunter562026.workers.dev/';
+
       const STORAGE_KEY = 'bookmarklet-soundboard:sounds:v1';
       const UPLOAD_KEY_STORAGE = 'bookmarklet-soundboard:upload_key';
       const UPLOADER_URL_STORAGE = 'bookmarklet-soundboard:uploader_url';
@@ -124,6 +128,7 @@
 
       // session token only (not persisted)
       let sessionToken = '';
+      let sessionUploadKey = '';
 
       let sounds = loadSounds();
       const board = document.getElementById('board');
@@ -138,17 +143,44 @@
       const tokenInput = document.getElementById('ghToken');
       const uploaderUrlInput = document.getElementById('uploaderUrl');
       const uploadKeyField = document.getElementById('uploadKeyField');
+      const saveUploadKeyCheckbox = document.getElementById('saveUploadKey');
       const progressContainer = document.getElementById('progressContainer');
 
-      // load saved uploader config
+      // Initialize hardcoded uploader URL in the UI (read-only)
+      uploaderUrlInput.value = HARDCODED_UPLOADER_URL;
+      uploaderUrlInput.readOnly = true;
+
+      // Load saved upload key only if present and user previously chose to save it
       const savedUploadKey = localStorage.getItem(UPLOAD_KEY_STORAGE) || '';
-      const savedUploaderUrl = localStorage.getItem(UPLOADER_URL_STORAGE) || '';
-      uploadKeyField.value = savedUploadKey;
-      uploaderUrlInput.value = savedUploaderUrl;
+      if(savedUploadKey){
+        uploadKeyField.value = savedUploadKey;
+        saveUploadKeyCheckbox.checked = true;
+      } else {
+        saveUploadKeyCheckbox.checked = false;
+      }
 
       tokenInput.addEventListener('input', ()=>{ sessionToken = tokenInput.value.trim(); });
-      uploaderUrlInput.addEventListener('input', ()=>{ localStorage.setItem(UPLOADER_URL_STORAGE, uploaderUrlInput.value.trim()); });
-      uploadKeyField.addEventListener('input', ()=>{ localStorage.setItem(UPLOAD_KEY_STORAGE, uploadKeyField.value.trim()); });
+      uploadKeyField.addEventListener('input', ()=>{
+        const val = uploadKeyField.value.trim();
+        if(saveUploadKeyCheckbox.checked){
+          if(val) localStorage.setItem(UPLOAD_KEY_STORAGE, val); else localStorage.removeItem(UPLOAD_KEY_STORAGE);
+        } else {
+          sessionUploadKey = val; // store only in session
+        }
+      });
+
+      saveUploadKeyCheckbox.addEventListener('change', ()=>{
+        if(saveUploadKeyCheckbox.checked){
+          // move session key into localStorage if present
+          const v = (sessionUploadKey || uploadKeyField.value.trim());
+          if(v) localStorage.setItem(UPLOAD_KEY_STORAGE, v);
+        } else {
+          // remove saved and keep in session
+          const v = uploadKeyField.value.trim();
+          if(v) sessionUploadKey = v;
+          localStorage.removeItem(UPLOAD_KEY_STORAGE);
+        }
+      });
 
       renderBoard();
 
@@ -175,31 +207,26 @@
       });
 
       uploadAllBtn.addEventListener('click', async ()=>{
-        const uploaderUrl = (localStorage.getItem(UPLOADER_URL_STORAGE) || '').trim();
-        const uploadKey = (localStorage.getItem(UPLOAD_KEY_STORAGE) || '').trim();
+        const uploaderUrl = HARDCODED_UPLOADER_URL; // hardcoded
+        const uploadKey = getUploadKey();
         const candidates = sounds.filter(s => typeof s.dataURL === 'string' && s.dataURL.startsWith('data:'));
         if(candidates.length===0){ alert('No local sounds to upload (already uploaded or remote).'); return; }
-        if(uploaderUrl){
-          if(!confirm('Upload '+candidates.length+' sound(s) to your repo via the configured Worker?')) return;
-          for(let i=0;i<candidates.length;i++){
-            const s = candidates[i];
-            showProgress('Uploading '+(i+1)+' / '+candidates.length+': '+s.filename);
-            try{ const res = await uploadViaWorker(uploaderUrl, s, uploadKey); s.dataURL = res.rawUrl; s.remoteUrl = res.rawUrl; s.remotePath = res.path; s.uploadedAt = Date.now(); saveSounds(); renderBoard(); }
-            catch(e){ alert('Upload failed for '+s.filename+': '+e.message); break; }
-          }
-          hideProgress();
-        }else{
-          if(!sessionToken){ alert('Please paste a GitHub token in the token field (session-only) or set a Worker URL.'); tokenInput.focus(); return; }
-          if(!confirm('Upload '+candidates.length+' sound(s) directly to the repo with your token?')) return;
-          for(let i=0;i<candidates.length;i++){
-            const s = candidates[i];
-            showProgress('Uploading '+(i+1)+' / '+candidates.length+': '+s.filename);
-            try{ await uploadSoundToRepoGH(s); saveSounds(); renderBoard(); }
-            catch(e){ alert('Upload failed for '+s.filename+': '+e.message); break; }
-          }
-          hideProgress();
+        if(!uploadKey){ if(!confirm('No upload key set. Uploads will be sent without a key. Continue?')) return; }
+        if(!confirm('Upload '+candidates.length+' sound(s) to your repo via the configured Worker?')) return;
+        for(let i=0;i<candidates.length;i++){
+          const s = candidates[i];
+          showProgress('Uploading '+(i+1)+' / '+candidates.length+': '+s.filename);
+          try{ const res = await uploadViaWorker(uploaderUrl, s, uploadKey); s.dataURL = res.rawUrl; s.remoteUrl = res.rawUrl; s.remotePath = res.path; s.uploadedAt = Date.now(); saveSounds(); renderBoard(); }
+          catch(e){ alert('Upload failed for '+s.filename+': '+e.message); break; }
         }
+        hideProgress();
       });
+
+      function getUploadKey(){
+        const saved = localStorage.getItem(UPLOAD_KEY_STORAGE);
+        if(saved) return saved;
+        return sessionUploadKey || '';
+      }
 
       function handleFiles(fileList){
         if(!fileList || fileList.length===0) return;
@@ -349,18 +376,12 @@
           // Upload button shown only if local data URL
           if(typeof s.dataURL === 'string' && s.dataURL.startsWith('data:')){
             const up = document.createElement('button'); up.className='tiny btn'; up.textContent='Upload'; up.addEventListener('click', async ()=>{
-              const uploaderUrl = (localStorage.getItem(UPLOADER_URL_STORAGE) || '').trim();
-              const uploadKey = (localStorage.getItem(UPLOAD_KEY_STORAGE) || '').trim();
-              if(uploaderUrl){
-                showProgress('Uploading ' + (s.filename || s.name) + '...');
-                try{ const res = await uploadViaWorker(uploaderUrl, s, uploadKey); s.dataURL = res.rawUrl; s.remoteUrl = res.rawUrl; s.remotePath = res.path; s.uploadedAt = Date.now(); saveSounds(); renderBoard(); hideProgress(); alert('Uploaded to repo: ' + s.remoteUrl); }
-                catch(e){ hideProgress(); alert('Upload failed: ' + e.message); }
-              }else{
-                if(!sessionToken){ alert('Please paste a GitHub token in the token field (session-only) or set a Worker URL.'); tokenInput.focus(); return; }
-                showProgress('Uploading ' + (s.filename || s.name) + ' to GitHub...');
-                try{ await uploadSoundToRepoGH(s); saveSounds(); renderBoard(); hideProgress(); alert('Uploaded to repo: ' + s.remoteUrl); }
-                catch(e){ hideProgress(); alert('Upload failed: ' + e.message); }
-              }
+              const uploaderUrl = HARDCODED_UPLOADER_URL; // hardcoded
+              const uploadKey = getUploadKey();
+              if(!uploadKey){ if(!confirm('No upload key set. Uploads will be sent without a key. Continue?')) return; }
+              showProgress('Uploading ' + (s.filename || s.name) + '...');
+              try{ const res = await uploadViaWorker(uploaderUrl, s, uploadKey); s.dataURL = res.rawUrl; s.remoteUrl = res.rawUrl; s.remotePath = res.path; s.uploadedAt = Date.now(); saveSounds(); renderBoard(); hideProgress(); alert('Uploaded to repo: ' + s.remoteUrl); }
+              catch(e){ hideProgress(); alert('Upload failed: ' + e.message); }
             });
             actions.appendChild(up);
           }else if(s.remoteUrl){
