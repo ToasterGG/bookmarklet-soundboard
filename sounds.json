@@ -71,6 +71,12 @@
       "name": "Minecraft damage",
       "file": "minecraft-damage-mu2m0k5emu6.wav",
       "addedAt": "2026-09-15T11:49:51.774Z"
+    },
+    {
+      "id": "mu2m0qtgka0",
+      "name": "Minecraft Hit Sound",
+      "file": "minecraft-hit-sound-mu2m0qtgka0.wav",
+      "addedAt": "2026-09-15T11:50:00.405Z"
     }
   ]
 }
